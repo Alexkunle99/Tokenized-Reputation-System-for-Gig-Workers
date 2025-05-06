@@ -134,3 +134,55 @@
 (define-read-only (get-last-token-id)
   (ok (var-get token-id-nonce))
 )
+
+
+
+(define-map worker-skills 
+    principal 
+    (list 10 (string-ascii 24)))
+
+(define-public (add-worker-skills (skills (list 10 (string-ascii 24))))
+    (let (
+        (profile (unwrap! (map-get? worker-profiles tx-sender) err-worker-not-found))
+    )
+        (map-set worker-skills tx-sender skills)
+        (ok true)
+    ))
+
+(define-read-only (get-worker-skills (worker principal))
+    (map-get? worker-skills worker))
+
+
+(define-constant dispute-window u144)
+(define-constant err-dispute-expired (err u104))
+
+(define-map endorsement-disputes
+    uint
+    {
+        disputer: principal,
+        worker: principal,
+        reason: (string-ascii 50),
+        resolved: bool
+    })
+
+(define-public (dispute-endorsement (token-id uint) (reason (string-ascii 50)))
+    (let (
+        (token-data (unwrap! (map-get? token-metadata token-id) err-worker-not-found))
+        (current-height stacks-block-height)
+    )
+        (asserts! (< (- current-height (get timestamp token-data)) dispute-window) err-dispute-expired)
+        (map-set endorsement-disputes
+            token-id
+            {
+                disputer: tx-sender,
+                worker: (get worker token-data),
+                reason: reason,
+                resolved: false
+            })
+        (ok true)
+    ))
+
+(define-read-only (get-dispute (token-id uint))
+    (map-get? endorsement-disputes token-id))
+
+
