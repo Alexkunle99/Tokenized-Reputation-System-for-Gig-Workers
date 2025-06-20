@@ -186,3 +186,17 @@
     (map-get? endorsement-disputes token-id))
 
 
+(define-public (complete-job-with-escrow (worker principal) (job-id uint))
+  (let (
+    (profile (unwrap! (map-get? worker-profiles worker) err-worker-not-found))
+  )
+    (try! (contract-call? .job-escrow complete-job job-id))
+    (map-set worker-profiles
+      worker
+      (merge profile {
+        jobs-completed: (+ (get jobs-completed profile) u1)
+      })
+    )
+    (ok true)
+  )
+)
