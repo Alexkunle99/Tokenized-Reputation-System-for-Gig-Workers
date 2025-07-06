@@ -14,6 +14,12 @@ epoch = 3.1
 path = 'contracts/rep-gig.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.milestone-rewards]
+path = 'contracts/milestone-rewards.clar'
+clarity_version = 3
+epoch = 3.1
+
 [repl.analysis]
 passes = ['check_checker']
 
