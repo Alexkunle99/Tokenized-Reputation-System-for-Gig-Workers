@@ -197,3 +197,309 @@
 (define-read-only (get-total-badges)
   (ok (var-get badge-id-nonce))
 )
+
+;; Professional Skill Certification Authority System
+;; Enables trusted authorities to issue verifiable skill certificates to workers
+
+(define-non-fungible-token skill-certificate uint)
+
+(define-constant err-not-certified-authority (err u400))
+(define-constant err-certificate-not-found (err u401))
+(define-constant err-certificate-expired (err u402))
+(define-constant err-authority-already-exists (err u403))
+(define-constant err-invalid-validity-period (err u404))
+(define-constant err-certificate-already-revoked (err u405))
+
+(define-data-var certificate-id-nonce uint u0)
+(define-data-var max-validity-blocks uint u52560) ;; ~1 year in blocks
+
+;; Trusted certification authorities registry
+(define-map certification-authorities
+  principal
+  {
+    name: (string-ascii 50),
+    domain: (string-ascii 30),
+    authorized: bool,
+    authorized-at: uint
+  }
+)
+
+;; Certificate data storage
+(define-map certificates
+  uint
+  {
+    worker: principal,
+    authority: principal,
+    skill-category: (string-ascii 30),
+    skill-name: (string-ascii 50),
+    proficiency-level: uint, ;; 1-10 scale
+    issued-at: uint,
+    expires-at: uint,
+    revoked: bool,
+    verification-hash: (string-ascii 64)
+  }
+)
+
+;; Worker's active certificates index
+(define-map worker-certificates
+  { worker: principal, skill-category: (string-ascii 30) }
+  (list 20 uint)
+)
+
+;; Authority's issued certificates count
+(define-map authority-stats
+  principal
+  {
+    total-issued: uint,
+    active-certificates: uint
+  }
+)
+
+;; Certificate validation requirements by skill category
+(define-map skill-requirements
+  (string-ascii 30)
+  {
+    min-proficiency: uint,
+    max-validity-blocks: uint,
+    requires-renewal: bool
+  }
+)
+
+;; Register a new certification authority (only contract owner)
+(define-public (register-authority (authority principal) (name (string-ascii 50)) (domain (string-ascii 30)))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) err-not-authorized)
+    (asserts! (is-none (map-get? certification-authorities authority)) err-authority-already-exists)
+    
+    (map-set certification-authorities
+      authority
+      {
+        name: name,
+        domain: domain,
+        authorized: true,
+        authorized-at: stacks-block-height
+      }
+    )
+    
+    (map-set authority-stats
+      authority
+      {
+        total-issued: u0,
+        active-certificates: u0
+      }
+    )
+    (ok true)
+  )
+)
+
+;; Issue a skill certificate to a worker
+(define-public (issue-certificate 
+  (worker principal) 
+  (skill-category (string-ascii 30)) 
+  (skill-name (string-ascii 50))
+  (proficiency-level uint)
+  (validity-blocks uint)
+  (verification-hash (string-ascii 64)))
+  (let (
+    (certificate-id (var-get certificate-id-nonce))
+    (authority-data (unwrap! (map-get? certification-authorities tx-sender) err-not-certified-authority))
+    (expires-at (+ stacks-block-height validity-blocks))
+    (max-validity (var-get max-validity-blocks))
+  )
+    ;; Validate authority and parameters
+    (asserts! (get authorized authority-data) err-not-certified-authority)
+    (asserts! (and (>= proficiency-level u1) (<= proficiency-level u10)) err-invalid-validity-period)
+    (asserts! (<= validity-blocks max-validity) err-invalid-validity-period)
+    
+    ;; Mint certificate NFT
+    (try! (nft-mint? skill-certificate certificate-id worker))
+    
+    ;; Store certificate data
+    (map-set certificates
+      certificate-id
+      {
+        worker: worker,
+        authority: tx-sender,
+        skill-category: skill-category,
+        skill-name: skill-name,
+        proficiency-level: proficiency-level,
+        issued-at: stacks-block-height,
+        expires-at: expires-at,
+        revoked: false,
+        verification-hash: verification-hash
+      }
+    )
+    
+    ;; Update worker's certificate index
+    (let (
+      (worker-cert-key { worker: worker, skill-category: skill-category })
+      (existing-certs (default-to (list) (map-get? worker-certificates worker-cert-key)))
+    )
+      (map-set worker-certificates
+        worker-cert-key
+        (unwrap! (as-max-len? (append existing-certs certificate-id) u20) (ok certificate-id))
+      )
+    )
+    
+    ;; Update authority statistics
+    (let (
+      (stats (unwrap! (map-get? authority-stats tx-sender) err-not-certified-authority))
+    )
+      (map-set authority-stats
+        tx-sender
+        {
+          total-issued: (+ (get total-issued stats) u1),
+          active-certificates: (+ (get active-certificates stats) u1)
+        }
+      )
+    )
+    
+    (var-set certificate-id-nonce (+ certificate-id u1))
+    (ok certificate-id)
+  )
+)
+
+;; Revoke a certificate (only issuing authority)
+(define-public (revoke-certificate (certificate-id uint))
+  (let (
+    (certificate (unwrap! (map-get? certificates certificate-id) err-certificate-not-found))
+  )
+    (asserts! (is-eq tx-sender (get authority certificate)) err-not-authorized)
+    (asserts! (not (get revoked certificate)) err-certificate-already-revoked)
+    
+    ;; Mark certificate as revoked
+    (map-set certificates
+      certificate-id
+      (merge certificate { revoked: true })
+    )
+    
+    ;; Update authority statistics
+    (let (
+      (stats (unwrap! (map-get? authority-stats tx-sender) err-not-certified-authority))
+    )
+      (map-set authority-stats
+        tx-sender
+        (merge stats { 
+          active-certificates: (- (get active-certificates stats) u1)
+        })
+      )
+    )
+    (ok true)
+  )
+)
+
+;; Verify if a certificate is valid and current
+(define-read-only (verify-certificate (certificate-id uint))
+  (match (map-get? certificates certificate-id)
+    certificate (let (
+      (current-block stacks-block-height)
+      (is-expired (> current-block (get expires-at certificate)))
+      (is-revoked (get revoked certificate))
+    )
+      (ok {
+        valid: (and (not is-expired) (not is-revoked)),
+        expired: is-expired,
+        revoked: is-revoked,
+        proficiency-level: (get proficiency-level certificate),
+        skill-name: (get skill-name certificate)
+      })
+    )
+    err-certificate-not-found
+  )
+)
+
+;; Get worker's certificates in a specific skill category
+(define-read-only (get-worker-skill-certificates (worker principal) (skill-category (string-ascii 30)))
+  (let (
+    (cert-ids (default-to (list) (map-get? worker-certificates { worker: worker, skill-category: skill-category })))
+  )
+    (ok {
+      certificates: cert-ids,
+      count: (len cert-ids)
+    })
+  )
+)
+
+;; Calculate worker's verified skill score in a category
+(define-read-only (get-verified-skill-score (worker principal) (skill-category (string-ascii 30)))
+  (let (
+    (cert-ids (default-to (list) (map-get? worker-certificates { worker: worker, skill-category: skill-category })))
+    (valid-scores (filter-valid-certificates cert-ids))
+  )
+    (if (> (len valid-scores) u0)
+      (ok (calculate-average-score valid-scores))
+      (ok u0)
+    )
+  )
+)
+
+;; Helper function to filter valid certificates and extract scores
+(define-private (filter-valid-certificates (cert-ids (list 20 uint)))
+  (fold check-certificate-validity cert-ids (list))
+)
+
+(define-private (check-certificate-validity (cert-id uint) (acc (list 20 uint)))
+  (match (map-get? certificates cert-id)
+    certificate (let (
+      (current-block stacks-block-height)
+      (is-valid (and 
+        (not (get revoked certificate))
+        (<= current-block (get expires-at certificate))
+      ))
+    )
+      (if is-valid
+        (unwrap! (as-max-len? (append acc (get proficiency-level certificate)) u20) acc)
+        acc
+      )
+    )
+    acc
+  )
+)
+
+;; Calculate average proficiency score
+(define-private (calculate-average-score (scores (list 20 uint)))
+  (let (
+    (total (fold + scores u0))
+    (count (len scores))
+  )
+    (if (> count u0)
+      (/ total count)
+      u0
+    )
+  )
+)
+
+;; Get certificate details
+(define-read-only (get-certificate (certificate-id uint))
+  (map-get? certificates certificate-id)
+)
+
+;; Get authority information
+(define-read-only (get-authority-info (authority principal))
+  (map-get? certification-authorities authority)
+)
+
+;; Get authority statistics
+(define-read-only (get-authority-stats (authority principal))
+  (map-get? authority-stats authority)
+)
+
+;; Check if principal is authorized authority
+(define-read-only (is-authorized-authority (authority principal))
+  (match (map-get? certification-authorities authority)
+    auth-data (get authorized auth-data)
+    false
+  )
+)
+
+;; Get total certificates issued
+(define-read-only (get-total-certificates)
+  (ok (var-get certificate-id-nonce))
+)
+
+;; Get certificate owner
+(define-read-only (get-certificate-owner (certificate-id uint))
+  (nft-get-owner? skill-certificate certificate-id)
+)
+
+
