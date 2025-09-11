@@ -1,0 +1,35 @@
+[project]
+name = 'rep-gig'
+description = ''
+authors = []
+telemetry = true
+cache_dir = '.\.cache'
+requirements = []
+[contracts.job-escrow]
+path = 'contracts/job-escrow.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.rep-gig]
+path = 'contracts/rep-gig.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.milestone-rewards]
+path = 'contracts/milestone-rewards.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.performance-analytics]
+path = 'contracts/performance-analytics.clar'
+clarity_version = 3
+epoch = 3.1
+
+[repl.analysis]
+passes = ['check_checker']
+
+[repl.analysis.check_checker]
+strict = false
+trusted_sender = false
+trusted_caller = false
+callee_filter = false
